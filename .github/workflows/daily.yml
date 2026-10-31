@@ -55,23 +55,8 @@ jobs:
           git diff --cached --quiet || git commit -m "data: $(date -u +%Y-%m-%d) run"
           git push
 
-      # site/ 폴더를 gh-pages 브랜치로 올리면 GitHub Pages가 그 브랜치를 보여 줍니다.
-      - name: Publish site/ to gh-pages
-        run: |
-          cd site
-          touch .nojekyll
-          git init -q -b gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -q -m "deploy ${GITHUB_SHA::7}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages
-
-      # 저장소 Settings → Pages → Source 가 "GitHub Actions" 이면 여기서 바로 배포됩니다.
-      # ("Deploy from a branch" 상태면 이 단계는 건너뛰고 gh-pages 브랜치가 쓰입니다.)
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
       - id: deploy
         uses: actions/deploy-pages@v4
-        continue-on-error: true
