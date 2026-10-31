@@ -2,6 +2,7 @@ name: daily
 
 on:
   schedule:
+    # 장이 닫혀 있을 때 수동 실행하면 가장 최근 장(지난 6일 안)을 돌립니다.
     # 평일 15:40 UTC = 뉴욕 10:40 (겨울) / 11:40 (서머타임). 스캔은 항상 10:15 기준으로 잘라서 봅니다.
     - cron: "40 15 * * 1-5"
   workflow_dispatch:
@@ -49,8 +50,8 @@ jobs:
           SCOPE: ${{ inputs.scope }}
         run: |
           if [ "$EVENT" = "push" ]; then
-            # 코드만 바뀐 푸시는 다시 배포만. 데이터가 아직 하나도 없으면 원문 예시(데모)로 첫 화면을 채웁니다.
-            [ -f site/data/index.json ] || python3 pipeline/run_daily.py --demo
+            # 코드만 바뀐 푸시는 다시 배포만. 실제 장 결과가 아직 하나도 없으면 가장 최근 장으로 한 번 돌립니다.
+            ls site/data/days 2>/dev/null | grep -qv demo || python3 pipeline/run_daily.py
           elif [ -n "$TICKERS" ]; then
             python3 pipeline/run_daily.py --tickers "$TICKERS"
           else

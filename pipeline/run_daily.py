@@ -15,6 +15,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -59,6 +60,20 @@ def read_symbols(path):
     return out
 
 
+def last_session(now_utc, at):
+    """The latest New York session whose opening range is done by `at`: today once it is past `at`
+    on a trading day, else the trading day before (weekends and the scanner's NYSE holidays skipped)."""
+    with open(os.path.join(SKILLS, "trader-scanner", "scan.py"), encoding="utf-8") as fh:
+        holidays = set(re.findall(r'"(\d{4}-\d{2}-\d{2})": "', fh.read()))
+    local = now_utc.astimezone(NY) if NY else now_utc
+    day = local.date()
+    if local.strftime("%H:%M") < at:
+        day -= datetime.timedelta(days=1)
+    while day.weekday() >= 5 or day.isoformat() in holidays:
+        day -= datetime.timedelta(days=1)
+    return day.isoformat()
+
+
 def slim_tm(doc):
     """Keep what the dashboard draws; the 2,000 sample paths are too heavy for a web page."""
     mc = {k: v for k, v in doc["mc"].items() if k != "sample_paths"}
@@ -92,6 +107,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--demo", action="store_true", help="the TSLA 2026-10-19 example from saved data")
     ap.add_argument("--at", default="10:15", help="scan the opening-range breakouts up to this New York time")
+    ap.add_argument("--date", help="YYYY-MM-DD within the last 6 days (default: the latest session, see last_session)")
     ap.add_argument("--list", action="store_true", help="scan pipeline/universe.txt instead of every US stock")
     ap.add_argument("--symbols", default=os.path.join(ROOT, "pipeline", "universe.txt"))
     ap.add_argument("--tickers", help="comma-separated tickers to scan instead (e.g. picked in the Actions tab)")
@@ -110,7 +126,7 @@ def main(argv=None):
         only = {"TSLA": os.path.join(DEMO, "TSLA-60d5m.json.gz")}
         scope = "demo"
     else:
-        day = now_utc.astimezone(NY).date().isoformat() if NY else now_utc.date().isoformat()
+        day = a.date or last_session(now_utc, a.at)
         only = None
         tickers = [t for t in (a.tickers or "").upper().replace(" ", ",").split(",") if t]
         if tickers:
@@ -181,7 +197,7 @@ def main(argv=None):
         # 4. /trader-news: the morning's headlines for what got replayed (no SEC, no key needed)
         tickers = [t["symbol"] for t in day_doc["trades"]]
         if tickers and not a.demo:
-            code, news, err = tool("trader-news", "news.py", "--tickers", *tickers, "--hours", "18", "--no-sec",
+            code, news, err = tool("trader-news", "news.py", "--tickers", *tickers, "--hours", str(18 + 24 * ((now_utc.astimezone(NY).date() - datetime.date.fromisoformat(day)).days if NY else 0)), "--no-sec",
                                    "--no-moves", "--dry-run", "--json")
             for it in (news or {}).get("items") or []:
                 lst = day_doc["news"].setdefault(it.get("ticker") or "?", [])
