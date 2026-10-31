@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Run the day-trader-skill tools once and write the day's results for the dashboard.
+
+    scanner (opening-range breakouts at 10:15) -> exit (stop / target) -> timemachine (10,000 replays)
+    -> news (headlines)  =>  site/data/days/YYYY-MM-DD.json + site/data/index.json
+
+    python3 pipeline/run_daily.py            # today, live Yahoo data (run after 10:15 AM New York)
+    python3 pipeline/run_daily.py --demo     # the README's TSLA example, 2026-10-19, from saved data
+
+Only standard-library Python. Nothing here can place an order.
+"""
+import argparse
+import datetime
+import json
+import os
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SKILLS = os.path.join(ROOT, ".claude", "skills")
+DEMO = os.path.join(ROOT, "pipeline", "demo")
+DATA = os.path.join(ROOT, "site", "data")
+WORK = os.path.join(ROOT, "trader", "pipeline")
+
+try:
+    from zoneinfo import ZoneInfo
+    NY = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - zoneinfo is in 3.9+
+    NY = None
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def tool(skill, script, *args):
+    """Run one skill's tool with --json and return (exit code, parsed JSON or None, stderr)."""
+    cmd = [sys.executable, os.path.join(SKILLS, skill, script)] + [str(a) for a in args]
+    log("$ " + " ".join(cmd[1:]))
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=1800)
+    try:
+        doc = json.loads(p.stdout) if p.stdout.strip() else None
+    except ValueError:
+        doc = None
+    if p.returncode not in (0, 1) or doc is None:
+        log((p.stderr or p.stdout).strip()[-800:])
+    return p.returncode, doc, p.stderr.strip()
+
+
+def read_symbols(path):
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for ln in fh:
+            ln = ln.split("#")[0].strip().upper()
+            if ln:
+                out.append(ln)
+    return out
+
+
+def slim_tm(doc):
+    """Keep what the dashboard draws; the 2,000 sample paths are too heavy for a web page."""
+    mc = {k: v for k, v in doc["mc"].items() if k != "sample_paths"}
+    return {"plan": doc["plan"], "mc": mc, "history": doc["history"], "verdict": doc["verdict"],
+            "verdict_notes": doc.get("verdict_notes") or [], "warnings": doc.get("warnings") or [],
+            "data": doc.get("data"), "note": doc.get("note"), "source": doc.get("source")}
+
+
+def update_index(day_doc):
+    path = os.path.join(DATA, "index.json")
+    idx = {"days": []}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            idx = json.load(fh)
+    key = day_doc["id"]
+    idx["days"] = [d for d in idx.get("days", []) if d["id"] != key]
+    idx["days"].append({
+        "id": key, "date": day_doc["date"], "demo": day_doc["demo"], "status": day_doc["status"],
+        "hits": day_doc["scan"].get("hits", 0), "replayed": len(day_doc["trades"]),
+        "verdicts": [t["tm"]["verdict"].split(":")[0] for t in day_doc["trades"] if t.get("tm")],
+    })
+    idx["days"].sort(key=lambda d: (d["date"], not d["demo"]), reverse=True)
+    idx["updated_at"] = day_doc["generated_at"]
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(idx, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--demo", action="store_true", help="the TSLA 2026-10-19 example from saved data")
+    ap.add_argument("--at", default="10:15", help="scan the opening-range breakouts up to this New York time")
+    ap.add_argument("--symbols", default=os.path.join(ROOT, "pipeline", "universe.txt"))
+    ap.add_argument("--top", type=int, default=8, help="how many breakouts get the 10,000 replays")
+    ap.add_argument("--replays", type=int, default=10000)
+    ap.add_argument("--seed", type=int, default=19)
+    a = ap.parse_args(argv)
+
+    os.makedirs(WORK, exist_ok=True)
+    os.makedirs(os.path.join(DATA, "days"), exist_ok=True)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+    if a.demo:
+        day = "2026-10-19"
+        scan_src = ["--offline", os.path.join(DEMO, "wall5m-2026-10-19.json.gz")]
+        only = {"TSLA": os.path.join(DEMO, "TSLA-60d5m.json.gz")}
+    else:
+        day = now_utc.astimezone(NY).date().isoformat() if NY else now_utc.date().isoformat()
+        scan_src = ["--symbols", ",".join(read_symbols(a.symbols))]
+        only = None
+    now_ny = "%s %s" % (day, a.at)
+
+    day_doc = {"id": day + ("-demo" if a.demo else ""), "date": day, "at": a.at, "demo": a.demo,
+               "generated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "ok", "message": None,
+               "scan": {}, "trades": [], "news": {}}
+
+    # 1. /trader-scanner: opening-range breakouts so far
+    code, scan, err = tool("trader-scanner", "scan.py", "orb", *scan_src, "--now", now_ny,
+                           "--out", os.path.join(WORK, "watchlist.json"), "--json", "--quiet")
+    if scan is None:
+        day_doc["status"] = "no_scan"
+        day_doc["message"] = (err.splitlines() or ["scanner failed"])[-1]
+    else:
+        hits = scan.get("hits") or []
+        day_doc["scan"] = {"as_of": scan.get("as_of"), "universe": scan.get("universe"),
+                           "scanned": scan.get("scanned"), "failed": scan.get("failed"), "hits": len(hits),
+                           "or_minutes": scan.get("or_minutes"), "note": scan.get("note"),
+                           "list": [{k: h.get(k) for k in ("symbol", "price", "at", "or_high", "or_low", "pct_over")}
+                                    for h in hits]}
+        picks = [h for h in hits if h.get("or_high") is not None and h.get("or_low") is not None]
+        if only is not None:
+            picks = [h for h in picks if h["symbol"] in only]
+        picks = picks[:a.top]
+
+        for h in picks:
+            sym = h["symbol"]
+            plan_path = os.path.join(WORK, "plan-%s.json" % sym)
+            trade = {"symbol": sym, "hit": day_doc["scan"]["list"][[x["symbol"] for x in hits].index(sym)]}
+            # 2. /trader-exit: stop at the range midpoint, target 1x the risk, flat by 3:55 PM
+            code, plan, err = tool("trader-exit", "exit.py", "plan", "--symbol", sym, "--entry", h["price"],
+                                   "--or-high", h["or_high"], "--or-low", h["or_low"], "--date", day,
+                                   "--time", h["at"], "--stop", "or-mid", "--target", "1R",
+                                   "--now", now_ny, "--write", plan_path, "--json")
+            if plan is None:
+                trade["error"] = (err.splitlines() or ["exit plan failed"])[-1]
+                day_doc["trades"].append(trade)
+                continue
+            trade["plan"] = {k: v for k, v in plan.items() if k not in ("note", "created_at", "created_by")}
+            # 3. /trader-timemachine: 10,000 replays + every past session the same rule fired
+            src = ["--offline", only[sym]] if only else []
+            code, tm, err = tool("trader-timemachine", "timemachine.py", "run", "--plan", plan_path, *src,
+                                 "--now", now_ny, "--replays", a.replays, "--seed", a.seed,
+                                 "--write", os.path.join(WORK, "timemachine-%s.json" % sym), "--json")
+            if tm is None:
+                trade["error"] = (err.splitlines() or ["time machine failed"])[-1]
+            else:
+                with open(os.path.join(WORK, "timemachine-%s.json" % sym), encoding="utf-8") as fh:
+                    trade["tm"] = slim_tm(json.load(fh))
+            day_doc["trades"].append(trade)
+
+        # 4. /trader-news: the morning's headlines for what got replayed (no SEC, no key needed)
+        tickers = [t["symbol"] for t in day_doc["trades"]]
+        if tickers and not a.demo:
+            code, news, err = tool("trader-news", "news.py", "--tickers", *tickers, "--hours", "18", "--no-sec",
+                                   "--no-moves", "--dry-run", "--json")
+            for it in (news or {}).get("items") or []:
+                lst = day_doc["news"].setdefault(it.get("ticker") or "?", [])
+                if len(lst) < 5:
+                    lst.append({k: it.get(k) for k in ("title", "link", "time", "source")})
+        if not hits:
+            day_doc["status"] = "no_hits"
+
+    out = os.path.join(DATA, "days", day_doc["id"] + ".json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(day_doc, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
+    update_index(day_doc)
+    log("Wrote %s: %s, %d hit(s), %d replayed." % (os.path.relpath(out, ROOT), day_doc["status"],
+                                                   day_doc["scan"].get("hits", 0), len(day_doc["trades"])))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
