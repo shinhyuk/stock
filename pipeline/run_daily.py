@@ -12,6 +12,7 @@
 Only standard-library Python. Nothing here can place an order.
 """
 import argparse
+import concurrent.futures
 import datetime
 import json
 import os
@@ -77,7 +78,9 @@ def last_session(now_utc, at):
 def slim_tm(doc):
     """Keep what the dashboard draws; the 2,000 sample paths are too heavy for a web page."""
     mc = {k: v for k, v in doc["mc"].items() if k != "sample_paths"}
-    return {"plan": doc["plan"], "mc": mc, "history": doc["history"], "verdict": doc["verdict"],
+    hist = dict(doc["history"], trades=[{k: x.get(k) for k in ("date", "time", "entry", "outcome", "R")}
+                                        for x in doc["history"].get("trades") or []])
+    return {"plan": doc["plan"], "mc": mc, "history": hist, "verdict": doc["verdict"],
             "verdict_notes": doc.get("verdict_notes") or [], "warnings": doc.get("warnings") or [],
             "data": doc.get("data"), "note": doc.get("note"), "source": doc.get("source")}
 
@@ -111,7 +114,8 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true", help="scan pipeline/universe.txt instead of every US stock")
     ap.add_argument("--symbols", default=os.path.join(ROOT, "pipeline", "universe.txt"))
     ap.add_argument("--tickers", help="comma-separated tickers to scan instead (e.g. picked in the Actions tab)")
-    ap.add_argument("--top", type=int, default=60, help="how many breakouts get the 10,000 replays")
+    ap.add_argument("--top", type=int, default=500, help="how many breakouts get the 10,000 replays")
+    ap.add_argument("--workers", type=int, default=4, help="time machines run side by side")
     ap.add_argument("--replays", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=19)
     a = ap.parse_args(argv)
@@ -168,10 +172,13 @@ def main(argv=None):
             picks = [h for h in picks if h["symbol"] in only]
         picks = picks[:a.top]
 
-        for h in picks:
+        names = [x["symbol"] for x in hits]
+
+        def replay(h):
             sym = h["symbol"]
             plan_path = os.path.join(WORK, "plan-%s.json" % sym)
-            trade = {"symbol": sym, "hit": day_doc["scan"]["list"][[x["symbol"] for x in hits].index(sym)]}
+            tm_path = os.path.join(WORK, "timemachine-%s.json" % sym)
+            trade = {"symbol": sym, "hit": day_doc["scan"]["list"][names.index(sym)]}
             # 2. /trader-exit: stop at the range midpoint, target 1x the risk, flat by 3:55 PM
             code, plan, err = tool("trader-exit", "exit.py", "plan", "--symbol", sym, "--entry", h["price"],
                                    "--or-high", h["or_high"], "--or-low", h["or_low"], "--date", day,
@@ -179,23 +186,28 @@ def main(argv=None):
                                    "--now", now_ny, "--write", plan_path, "--json")
             if plan is None:
                 trade["error"] = (err.splitlines() or ["exit plan failed"])[-1]
-                day_doc["trades"].append(trade)
-                continue
+                return trade
             trade["plan"] = {k: v for k, v in plan.items() if k not in ("note", "created_at", "created_by")}
             # 3. /trader-timemachine: 10,000 replays + every past session the same rule fired
             src = ["--offline", only[sym]] if only else []
             code, tm, err = tool("trader-timemachine", "timemachine.py", "run", "--plan", plan_path, *src,
                                  "--now", now_ny, "--replays", a.replays, "--seed", a.seed,
-                                 "--write", os.path.join(WORK, "timemachine-%s.json" % sym), "--json")
+                                 "--write", tm_path, "--json")
             if tm is None:
                 trade["error"] = (err.splitlines() or ["time machine failed"])[-1]
             else:
-                with open(os.path.join(WORK, "timemachine-%s.json" % sym), encoding="utf-8") as fh:
+                with open(tm_path, encoding="utf-8") as fh:
                     trade["tm"] = slim_tm(json.load(fh))
-            day_doc["trades"].append(trade)
+            return trade
+
+        # a few at a time: each one is a single chart request, then pure arithmetic
+        with concurrent.futures.ThreadPoolExecutor(max_workers=a.workers) as pool:
+            day_doc["trades"] = list(pool.map(replay, picks))
 
         # 4. /trader-news: the morning's headlines for what got replayed (no SEC, no key needed)
-        tickers = [t["symbol"] for t in day_doc["trades"]]
+        # only for what did not lean toward the stop, so the headline requests stay few
+        tickers = [t["symbol"] for t in day_doc["trades"] if t.get("tm") and t["tm"]["mc"]["avg_R"] > 0
+                   and "toward the stop" not in t["tm"]["verdict"]][:40]
         if tickers and not a.demo:
             code, news, err = tool("trader-news", "news.py", "--tickers", *tickers, "--hours", str(18 + 24 * ((now_utc.astimezone(NY).date() - datetime.date.fromisoformat(day)).days if NY else 0)), "--no-sec",
                                    "--no-moves", "--dry-run", "--json")
@@ -208,7 +220,7 @@ def main(argv=None):
 
     out = os.path.join(DATA, "days", day_doc["id"] + ".json")
     with open(out, "w", encoding="utf-8") as fh:
-        json.dump(day_doc, fh, ensure_ascii=False, indent=1)
+        json.dump(day_doc, fh, ensure_ascii=False, separators=(",", ":"))
         fh.write("\n")
     update_index(day_doc)
     log("Wrote %s: %s, %d hit(s), %d replayed." % (os.path.relpath(out, ROOT), day_doc["status"],

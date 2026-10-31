@@ -223,11 +223,22 @@
             (h.triggered ? h.target + "승 " + h.stop + "패 / " + h.triggered : "–") + "</td></tr>";
         }).join("") + "</table></div></section>";
     }
-    html += trades.map(function (x) {
-      return '<div data-g="' + x.g.key + '" data-s="' + esc(x.t.symbol) + '">' + tradeCard(x.t, (doc.news || {})[x.t.symbol]) + "</div>";
-    }).join("");
+    html += '<div id="cards"></div>';
     $("trades").innerHTML = html;
+    state.trades = trades;
+    state.news = doc.news || {};
     applyFilter();
+    Array.prototype.forEach.call(document.querySelectorAll('.rank a[href^="#c-"]'), function (link) {
+      link.addEventListener("click", function (e) {
+        e.preventDefault();
+        var sym = link.getAttribute("href").slice(3);
+        if (!document.getElementById("c-" + sym)) {
+          var x = state.trades.filter(function (y) { return y.t.symbol === sym; })[0];
+          $("cards").insertAdjacentHTML("afterbegin", tradeCard(x.t, state.news[sym]));
+        }
+        document.getElementById("c-" + sym).scrollIntoView({ behavior: "smooth" });
+      });
+    });
     Array.prototype.forEach.call(document.querySelectorAll(".filters button"), function (b) {
       b.addEventListener("click", function () {
         state.filter = b.getAttribute("data-f");
@@ -246,14 +257,21 @@
       }).join("") + "</table></div></details>" : "";
   }
 
-  var state = { filter: "all", q: "" };
+  // The ranking table holds every ticker; the heavy detail cards are drawn for the first few matches only.
+  var CARDS = 12;
+  var state = { filter: "all", q: "", trades: [], news: {} };
   function applyFilter() {
     var q = state.q.trim().toUpperCase();
-    Array.prototype.forEach.call(document.querySelectorAll("#trades [data-g]"), function (el) {
-      var ok = (state.filter === "all" || el.getAttribute("data-g") === state.filter) &&
-        (!q || el.getAttribute("data-s").indexOf(q) === 0);
-      el.style.display = ok ? "" : "none";
+    var match = function (g, sym) {
+      return (state.filter === "all" || g === state.filter) && (!q || sym.indexOf(q) === 0);
+    };
+    Array.prototype.forEach.call(document.querySelectorAll(".rank tr[data-g]"), function (el) {
+      el.style.display = match(el.getAttribute("data-g"), el.getAttribute("data-s")) ? "" : "none";
     });
+    if (!$("cards")) return;
+    var shown = state.trades.filter(function (x) { return x.t.tm && match(x.g.key, x.t.symbol); });
+    $("cards").innerHTML = shown.slice(0, CARDS).map(function (x) { return tradeCard(x.t, state.news[x.t.symbol]); }).join("") +
+      (shown.length > CARDS ? '<p class="muted">상세 카드는 위에서 ' + CARDS + "개만 보여 줍니다. 나머지는 표에서 종목 이름을 누르세요.</p>" : "");
   }
 
   function load(id) {
