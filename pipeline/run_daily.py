@@ -26,6 +26,9 @@ DEMO = os.path.join(ROOT, "pipeline", "demo")
 DATA = os.path.join(ROOT, "site", "data")
 WORK = os.path.join(ROOT, "trader", "pipeline")
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from names import company_names, usd_krw  # noqa: E402
+
 try:
     from zoneinfo import ZoneInfo
     NY = ZoneInfo("America/New_York")
@@ -263,6 +266,15 @@ def main(argv=None):
                     lst.append({k: it.get(k) for k in ("title", "link", "time", "source")})
         if not hits:
             day_doc["status"] = "no_hits"
+
+    # plain names and won for the dashboard
+    if day_doc["scan"].get("list"):
+        who = company_names() if not a.demo else {"TSLA": "Tesla, Inc."}
+        for h in day_doc["scan"]["list"]:
+            h["name"] = who.get(h["symbol"])
+        for t in day_doc["trades"]:
+            t["hit"]["name"] = who.get(t["symbol"])
+    day_doc["fx_krw"] = usd_krw()
 
     out = os.path.join(DATA, "days", day_doc["id"] + ".json")
     with open(out, "w", encoding="utf-8") as fh:

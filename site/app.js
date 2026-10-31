@@ -42,6 +42,50 @@
     else key = "watch";
     return { key: key, score: m.avg_R + (hn >= 10 ? 0.5 * hR : 0) };
   }
+  // 100만 원 계좌 기준, 자동매매와 같은 규칙으로 몇 주 사고 얼마 벌거나 잃는지 (supabase trader_config 기본값)
+  var ACCOUNT_KRW = 1000000, MAX_LOSS_USD = 10, POSITION_PCT = 0.45, FX = 1400;
+  function won(x, sign) {
+    var r = Math.round(x / 100) * 100;
+    var a = Math.abs(r) >= 10000 ? (Math.abs(r) / 10000).toFixed(Math.abs(r) >= 100000 ? 0 : 1).replace(/\.0$/, "") + "만" :
+      Math.abs(r).toLocaleString("ko-KR");
+    return (sign && r > 0 ? "+" : r < 0 ? "−" : "") + a + "원";
+  }
+  function plain(t, fx) {
+    if (!t.tm) return null;
+    var p = t.tm.plan, m = t.tm.mc, h = t.tm.history || {};
+    var risk = p.entry - p.stop, acct = ACCOUNT_KRW / fx;
+    var qty = Math.max(0, Math.min(Math.floor(MAX_LOSS_USD / risk), Math.floor(acct * POSITION_PCT / p.entry)));
+    return {
+      qty: qty, invest: p.entry * qty * fx, priceKrw: p.entry * fx,
+      win: (p.target - p.entry) * qty * fx, lose: (p.entry - p.stop) * qty * fx,
+      expect: m.avg_R * risk * qty * fx,
+      pWin: m.p_green != null ? m.p_green : m.p_target, pT: m.p_target, pS: m.p_stop, pN: m.p_neither,
+      hist: h.triggered ? { n: h.triggered, t: h.target, s: h.stop, sessions: h.sessions } : null,
+    };
+  }
+  function nameOf(t) { return t.hit && t.hit.name ? t.hit.name : t.symbol; }
+
+  // 오늘 뭘 살까: 후보를 쉬운 말과 원화로
+  function pickCard(t, rank, fx) {
+    var x = plain(t, fx), p = t.tm.plan, g = grade(t);
+    if (!x.qty) return "";
+    return '<article class="pick">' +
+      '<div class="pick-head"><span class="rank">' + rank + '</span><div><div class="pick-name">' + esc(nameOf(t)) +
+      (t.hit.inverse ? ' <span class="tag">인버스 · 지수 하락에 베팅</span>' : "") + "</div>" +
+      '<div class="muted">' + esc(t.symbol) + " · 1주 $" + px(p.entry) + " (" + won(x.priceKrw) + ") · <strong>" + x.qty + "주 = " +
+      won(x.invest) + "어치</strong></div></div>" + gradeBadge(g) + "</div>" +
+      '<div class="pick-body"><div class="big"><div class="k">돈 벌고 끝날 확률</div><div class="v">' + Math.round(x.pWin * 100) + "%</div>" +
+      '<div class="k">· 1만 번 해 보면 평균 <strong class="' + (x.expect >= 0 ? "o-target" : "o-stop") + '">' + won(x.expect, true) + "</strong></div></div>" +
+      '<div class="outcomes">' +
+      '<div class="oc win"><span>익절</span><b>' + won(x.win, true) + "</b><i>" + pct(x.pT) + "</i></div>" +
+      '<div class="oc lose"><span>손절</span><b>' + won(-x.lose, true) + "</b><i>" + pct(x.pS) + "</i></div>" +
+      '<div class="oc flat"><span>둘 다 아님</span><b>마감 전 정리</b><i>' + pct(x.pN) + "</i></div></div></div>" +
+      '<p class="muted pick-foot">📋 $' + px(p.entry) + " 근처에서 사기 → <span class=\"o-target\">$" + px(p.target) + " 닿으면 팔기(익절)</span> · " +
+      '<span class="o-stop">$' + px(p.stop) + " 밑으로 떨어지면 팔기(손절)</span> · 둘 다 아니면 장 마감 10분 전에 팔기" +
+      (x.hist ? "<br>지난 " + x.hist.sessions + "일 중 같은 상황 " + x.hist.n + "번: 익절 " + x.hist.t + "번 · 손절 " + x.hist.s + "번" : "") +
+      ' · <a href="#c-' + esc(t.symbol) + '" data-open="' + esc(t.symbol) + '">자세히</a></p></article>';
+  }
+
   function gradeBadge(g) {
     var tone = { pick: "good", watch: "flat", pass: "bad", none: "flat" }[g.key];
     return '<span class="grade ' + tone + '">' + GRADE[g.key] + "</span>";
@@ -117,8 +161,9 @@
 
   function tradeCard(t, news) {
     var g = grade(t);
-    var head = '<h2>' + esc(t.symbol) + " " + gradeBadge(g) + ' <span class="px">' + esc(t.hit.at || "") + " 진입가 " + px(t.hit.price) +
-      " · 범위 " + px(t.hit.or_low) + " ~ " + px(t.hit.or_high) + " (+" + esc(t.hit.pct_over) + "%)</span></h2>";
+    var head = '<h2>' + esc(nameOf(t)) + ' <span class="px">' + esc(t.symbol) + "</span> " + gradeBadge(g) + "</h2>" +
+      '<p class="muted">' + esc(t.hit.at || "") + "에 개장 15분 최고가(" + px(t.hit.or_high) + ")를 " + esc(t.hit.pct_over) +
+      "% 넘어서 마감 → 이 가격 " + px(t.hit.price) + "에 사는 계획</p>";
     if (!t.tm) {
       return '<article class="card" id="c-' + esc(t.symbol) + '">' + head + '<p class="err">' + esc(t.error || "결과 없음") + "</p></article>";
     }
@@ -127,8 +172,12 @@
       '<div><div class="k">진입</div><div class="v">' + px(p.entry) + "</div></div>" +
       '<div class="stop"><div class="k">손절 (범위 가운데)</div><div class="v">' + px(p.stop) + "</div></div>" +
       '<div class="target"><div class="k">목표 (위험의 ' + esc(m.r_at_target) + '배)</div><div class="v">' + px(p.target) + "</div></div>" +
-      '<div><div class="k">주당 위험</div><div class="v">' + px(p.risk_per_share) + "</div></div>" +
-      '<div><div class="k">평균 R</div><div class="v">' + (m.avg_R > 0 ? "+" : "") + m.avg_R.toFixed(3) + "</div></div>" +
+      (function () {
+        var y = plain(t, state.fx || FX);
+        return y.qty ? '<div><div class="k">100만 원이면</div><div class="v">' + y.qty + "주 · " + won(y.invest) + "</div></div>" +
+          '<div><div class="k">돈 벌 확률 · 평균 기대</div><div class="v">' + Math.round(y.pWin * 100) + "% · " + won(y.expect, true) + "</div></div>"
+          : '<div><div class="k">100만 원이면</div><div class="v">1주도 안 됨</div></div>';
+      })() +
       "</div>";
     var odds = '<div class="odds">' +
       '<span class="t" style="width:' + pct(m.p_target) + '">' + (m.p_target > 0.08 ? "목표 " + pct(m.p_target) : "") + "</span>" +
@@ -201,35 +250,49 @@
     trades.sort(function (x, y) { return y.g.score - x.g.score; });
     var counts = { pick: 0, watch: 0, pass: 0, none: 0 };
     trades.forEach(function (x) { counts[x.g.key]++; });
+    var fx = doc.fx_krw || FX;
     if (trades.length) {
-      html += '<section class="card rank"><h2>오늘의 추천 순위</h2>' +
-        '<p class="muted">1만 번 시뮬레이션 평균 R과 지난 59일 같은 자리의 실제 평균 R을 합친 점수 순. ' +
-        "<strong>후보</strong> = 두 결과가 모두 목표 쪽을 가리키고 지난 기록이 10번 이상. 그 외 대부분은 동전 던지기라 패스가 기본입니다.</p>" +
+      var picks = trades.filter(function (x) { return x.g.key === "pick"; }).slice(0, 5);
+      var cards = picks.map(function (x, i) { return pickCard(x.t, i + 1, fx); }).join("");
+      var isToday = doc.date === new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 10);
+      html += '<section class="picks"><h2>' + (isToday ? "오늘 뭘 살까" : esc(doc.date) + " 후보 (이날 샀다면)") +
+        " <span class=\"muted\">100만 원 기준 · 1번에 최대 " + won(MAX_LOSS_USD * fx) + "까지만 잃게</span></h2>" +
+        (cards ? '<div class="pick-grid">' + cards + "</div>" :
+          '<div class="notice">오늘은 확률이 좋은 종목이 없어요. <strong>쉬는 게 답</strong>입니다. (아래 표에서 전체 결과를 볼 수 있어요)</div>') +
+        '<p class="muted">달러 1 = ' + Math.round(fx).toLocaleString() + "원. 수수료·환전 비용 제외. 확률은 1만 번 가상 시뮬레이션이라 예측이 아닙니다.</p></section>";
+      html += '<section class="card rank"><h2>전체 순위</h2>' +
+        '<p class="muted">1만 번 시뮬레이션과 지난 59일 같은 상황의 실제 결과를 합친 점수 순. ' +
+        "<strong>오늘의 후보</strong> = 두 결과가 모두 익절 쪽. 대부분은 동전 던지기 수준이라 패스가 기본입니다.</p>" +
         '<div class="filters">' + ["all", "pick", "watch", "pass"].map(function (k) {
           var n = k === "all" ? trades.length : counts[k];
           return '<button data-f="' + k + '"' + (state.filter === k ? ' class="on"' : "") + ">" +
             (k === "all" ? "전체" : GRADE[k]) + " " + n + "</button>";
-        }).join("") + '<input id="q" type="search" placeholder="종목 검색 (예: NVDA)" value="' + esc(state.q) + '"></div>' +
-        '<div class="table-wrap"><table><tr><th>#</th><th>종목</th><th>판정</th><th>매수</th><th>익절</th><th>손절</th>' +
-        "<th>목표 먼저</th><th>손절 먼저</th><th>평균 R</th><th>지난 기록</th></tr>" +
+        }).join("") + '<input id="q" type="search" placeholder="회사·종목 검색 (예: Tesla, NVDA)" value="' + esc(state.q) + '"></div>' +
+        '<div class="table-wrap"><table><tr><th>#</th><th>회사</th><th>판정</th><th>돈 벌 확률</th><th>평균 기대</th>' +
+        "<th>익절 시</th><th>손절 시</th><th>1주 가격</th><th>몇 주</th><th>지난 기록</th></tr>" +
         trades.map(function (x, i) {
           var t = x.t, tm = t.tm;
-          if (!tm) return '<tr data-g="none" data-s="' + esc(t.symbol) + '"><td>' + (i + 1) + '</td><td><a href="#c-' + esc(t.symbol) + '">' +
-            esc(t.symbol) + "</a></td><td>" + gradeBadge(x.g) + '</td><td colspan="7" class="muted">' + esc(t.error || "") + "</td></tr>";
-          var m = tm.mc, h = tm.history || {}, p = tm.plan;
-          return '<tr data-g="' + x.g.key + '" data-s="' + esc(t.symbol) + '"><td>' + (i + 1) + '</td><td><a href="#c-' + esc(t.symbol) + '">' +
-            esc(t.symbol) + "</a></td><td>" + gradeBadge(x.g) + "</td><td>" + px(p.entry) + '</td><td class="o-target">' + px(p.target) +
-            '</td><td class="o-stop">' + px(p.stop) + "</td><td>" + pct(m.p_target) + "</td><td>" + pct(m.p_stop) + "</td><td>" +
-            (m.avg_R > 0 ? "+" : "") + m.avg_R.toFixed(2) + "</td><td>" +
-            (h.triggered ? h.target + "승 " + h.stop + "패 / " + h.triggered : "–") + "</td></tr>";
+          var who = '<a href="#c-' + esc(t.symbol) + '" title="' + esc(t.symbol) + '">' + esc(nameOf(t)) + '</a> <span class="muted">' +
+            esc(t.symbol) + "</span>" + (t.hit.inverse ? ' <span class="tag">인버스</span>' : "");
+          if (!tm) return '<tr data-g="none" data-s="' + esc(t.symbol) + '" data-n="' + esc(nameOf(t).toUpperCase()) + '"><td>' + (i + 1) +
+            "</td><td>" + who + "</td><td>" + gradeBadge(x.g) + '</td><td colspan="7" class="muted">데이터 부족</td></tr>';
+          var m = tm.mc, h = tm.history || {}, p = tm.plan, y = plain(t, fx);
+          return '<tr data-g="' + x.g.key + '" data-s="' + esc(t.symbol) + '" data-n="' + esc(nameOf(t).toUpperCase()) + '"><td>' + (i + 1) +
+            "</td><td>" + who + "</td><td>" + gradeBadge(x.g) + "</td><td><strong>" + Math.round(y.pWin * 100) + "%</strong></td>" +
+            '<td class="' + (y.expect >= 0 ? "o-target" : "o-stop") + '">' + (y.qty ? won(y.expect, true) : "–") + "</td>" +
+            '<td class="o-target">' + (y.qty ? won(y.win, true) + " <i>" + pct(m.p_target) + "</i>" : "–") + "</td>" +
+            '<td class="o-stop">' + (y.qty ? won(-y.lose, true) + " <i>" + pct(m.p_stop) + "</i>" : "–") + "</td>" +
+            "<td>$" + px(p.entry) + "</td><td>" + (y.qty ? y.qty + "주" : "1주도 안 됨") + "</td><td>" +
+            (h.triggered ? h.triggered + "번 중 익절 " + h.target : "–") + "</td></tr>";
         }).join("") + "</table></div></section>";
     }
     html += '<div id="cards"></div>';
     $("trades").innerHTML = html;
     state.trades = trades;
+    state.fx = fx;
     state.news = doc.news || {};
     applyFilter();
-    Array.prototype.forEach.call(document.querySelectorAll('.rank a[href^="#c-"]'), function (link) {
+    Array.prototype.forEach.call(document.querySelectorAll('.rank a[href^="#c-"], .picks a[href^="#c-"]'), function (link) {
       link.addEventListener("click", function (e) {
         e.preventDefault();
         var sym = link.getAttribute("href").slice(3);
@@ -263,14 +326,14 @@
   var state = { filter: "all", q: "", trades: [], news: {} };
   function applyFilter() {
     var q = state.q.trim().toUpperCase();
-    var match = function (g, sym) {
-      return (state.filter === "all" || g === state.filter) && (!q || sym.indexOf(q) === 0);
+    var match = function (g, sym, name) {
+      return (state.filter === "all" || g === state.filter) && (!q || sym.indexOf(q) === 0 || (name || "").indexOf(q) >= 0);
     };
     Array.prototype.forEach.call(document.querySelectorAll(".rank tr[data-g]"), function (el) {
-      el.style.display = match(el.getAttribute("data-g"), el.getAttribute("data-s")) ? "" : "none";
+      el.style.display = match(el.getAttribute("data-g"), el.getAttribute("data-s"), el.getAttribute("data-n")) ? "" : "none";
     });
     if (!$("cards")) return;
-    var shown = state.trades.filter(function (x) { return x.t.tm && match(x.g.key, x.t.symbol); });
+    var shown = state.trades.filter(function (x) { return x.t.tm && match(x.g.key, x.t.symbol, nameOf(x.t).toUpperCase()); });
     $("cards").innerHTML = shown.slice(0, CARDS).map(function (x) { return tradeCard(x.t, state.news[x.t.symbol]); }).join("") +
       (shown.length > CARDS ? '<p class="muted">상세 카드는 위에서 ' + CARDS + "개만 보여 줍니다. 나머지는 표에서 종목 이름을 누르세요.</p>" : "");
   }
