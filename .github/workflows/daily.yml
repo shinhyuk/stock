@@ -6,10 +6,15 @@ on:
     - cron: "40 15 * * 1-5"
   workflow_dispatch:
     inputs:
-      demo:
-        description: "원문 예시(TSLA 2026-10-19)를 저장된 데이터로 돌리기"
-        type: boolean
-        default: false
+      tickers:
+        description: "직접 고른 종목만 (쉼표로, 예: NVDA,PLTR,SOFI). 비우면 아래 범위대로"
+        type: string
+        default: ""
+      scope:
+        description: "스캔 범위"
+        type: choice
+        options: ["all — 미국 전체 (~5,900)", "list — pipeline/universe.txt", "demo — 원문 예시 (TSLA 2026-10-19)"]
+        default: "all — 미국 전체 (~5,900)"
   push:
     branches: [master]
     paths: ["site/**", ".github/workflows/daily.yml"]
@@ -26,6 +31,7 @@ concurrency:
 jobs:
   run-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -37,14 +43,22 @@ jobs:
           python-version: "3.12"
 
       - name: Run the skills (scanner → exit → time machine → news)
+        env:
+          EVENT: ${{ github.event_name }}
+          TICKERS: ${{ inputs.tickers }}
+          SCOPE: ${{ inputs.scope }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "$EVENT" = "push" ]; then
             # 코드만 바뀐 푸시는 다시 배포만. 데이터가 아직 하나도 없으면 원문 예시(데모)로 첫 화면을 채웁니다.
             [ -f site/data/index.json ] || python3 pipeline/run_daily.py --demo
-          elif [ "${{ inputs.demo }}" = "true" ]; then
-            python3 pipeline/run_daily.py --demo
+          elif [ -n "$TICKERS" ]; then
+            python3 pipeline/run_daily.py --tickers "$TICKERS"
           else
-            python3 pipeline/run_daily.py
+            case "$SCOPE" in
+              demo*) python3 pipeline/run_daily.py --demo ;;
+              list*) python3 pipeline/run_daily.py --list ;;
+              *)     python3 pipeline/run_daily.py ;;
+            esac
           fi
 
       - name: Save the results

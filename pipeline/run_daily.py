@@ -4,7 +4,9 @@
     scanner (opening-range breakouts at 10:15) -> exit (stop / target) -> timemachine (10,000 replays)
     -> news (headlines)  =>  site/data/days/YYYY-MM-DD.json + site/data/index.json
 
-    python3 pipeline/run_daily.py            # today, live Yahoo data (run after 10:15 AM New York)
+    python3 pipeline/run_daily.py            # today, every US stock (Nasdaq Trader list), live Yahoo data
+    python3 pipeline/run_daily.py --list     # today, only the tickers in pipeline/universe.txt
+    python3 pipeline/run_daily.py --tickers NVDA,PLTR,SOFI   # today, only these
     python3 pipeline/run_daily.py --demo     # the README's TSLA example, 2026-10-19, from saved data
 
 Only standard-library Python. Nothing here can place an order.
@@ -75,6 +77,7 @@ def update_index(day_doc):
     idx["days"] = [d for d in idx.get("days", []) if d["id"] != key]
     idx["days"].append({
         "id": key, "date": day_doc["date"], "demo": day_doc["demo"], "status": day_doc["status"],
+        "scope": day_doc.get("scope"),
         "hits": day_doc["scan"].get("hits", 0), "replayed": len(day_doc["trades"]),
         "verdicts": [t["tm"]["verdict"].split(":")[0] for t in day_doc["trades"] if t.get("tm")],
     })
@@ -89,8 +92,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--demo", action="store_true", help="the TSLA 2026-10-19 example from saved data")
     ap.add_argument("--at", default="10:15", help="scan the opening-range breakouts up to this New York time")
+    ap.add_argument("--list", action="store_true", help="scan pipeline/universe.txt instead of every US stock")
     ap.add_argument("--symbols", default=os.path.join(ROOT, "pipeline", "universe.txt"))
-    ap.add_argument("--top", type=int, default=8, help="how many breakouts get the 10,000 replays")
+    ap.add_argument("--tickers", help="comma-separated tickers to scan instead (e.g. picked in the Actions tab)")
+    ap.add_argument("--top", type=int, default=60, help="how many breakouts get the 10,000 replays")
     ap.add_argument("--replays", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=19)
     a = ap.parse_args(argv)
@@ -103,14 +108,29 @@ def main(argv=None):
         day = "2026-10-19"
         scan_src = ["--offline", os.path.join(DEMO, "wall5m-2026-10-19.json.gz")]
         only = {"TSLA": os.path.join(DEMO, "TSLA-60d5m.json.gz")}
+        scope = "demo"
     else:
         day = now_utc.astimezone(NY).date().isoformat() if NY else now_utc.date().isoformat()
-        scan_src = ["--symbols", ",".join(read_symbols(a.symbols))]
         only = None
+        tickers = [t for t in (a.tickers or "").upper().replace(" ", ",").split(",") if t]
+        if tickers:
+            scan_src, scope = ["--symbols", ",".join(tickers)], "tickers"
+        elif a.list:
+            scan_src, scope = ["--symbols", ",".join(read_symbols(a.symbols))], "list"
+        else:
+            # every US-listed common stock, ordinary share and ADR (~5,900) from Nasdaq Trader's lists
+            uni = os.path.join(WORK, "universe.txt")
+            code, _, err = tool("trader-scanner", "scan.py", "universe", "--out", uni, "--json")
+            if os.path.exists(uni):
+                scan_src, scope = ["--universe", uni, "--max-confirm", "0"], "all"
+            else:
+                log("Nasdaq Trader list failed, falling back to pipeline/universe.txt")
+                scan_src, scope = ["--symbols", ",".join(read_symbols(a.symbols))], "list"
     now_ny = "%s %s" % (day, a.at)
 
-    day_doc = {"id": day + ("-demo" if a.demo else ""), "date": day, "at": a.at, "demo": a.demo,
+    day_doc = {"id": day + {"demo": "-demo", "tickers": "-pick"}.get(scope, ""), "date": day, "at": a.at, "demo": a.demo,
                "generated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "ok", "message": None,
+               "scope": scope, "tickers": scan_src[1] if scope == "tickers" else None,
                "scan": {}, "trades": [], "news": {}}
 
     # 1. /trader-scanner: opening-range breakouts so far
@@ -124,6 +144,7 @@ def main(argv=None):
         day_doc["scan"] = {"as_of": scan.get("as_of"), "universe": scan.get("universe"),
                            "scanned": scan.get("scanned"), "failed": scan.get("failed"), "hits": len(hits),
                            "or_minutes": scan.get("or_minutes"), "note": scan.get("note"),
+                           "unconfirmed": scan.get("unconfirmed"),
                            "list": [{k: h.get(k) for k in ("symbol", "price", "at", "or_high", "or_low", "pct_over")}
                                     for h in hits]}
         picks = [h for h in hits if h.get("or_high") is not None and h.get("or_low") is not None]
@@ -164,7 +185,7 @@ def main(argv=None):
                                    "--no-moves", "--dry-run", "--json")
             for it in (news or {}).get("items") or []:
                 lst = day_doc["news"].setdefault(it.get("ticker") or "?", [])
-                if len(lst) < 5:
+                if len(lst) < 3:
                     lst.append({k: it.get(k) for k in ("title", "link", "time", "source")})
         if not hits:
             day_doc["status"] = "no_hits"

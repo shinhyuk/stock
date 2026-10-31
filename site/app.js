@@ -29,6 +29,23 @@
   }
   var OUTCOME = { target: "목표", stop: "손절", close: "둘 다 아님" };
 
+  // 일별 추천: 1만 번 결과와 지난 날 실제 기록이 둘 다 같은 쪽을 가리킬 때만 '후보'.
+  var GRADE = { pick: "오늘의 후보", watch: "애매", pass: "패스", none: "결과 없음" };
+  function grade(t) {
+    if (!t.tm) return { key: "none", score: -99 };
+    var m = t.tm.mc, h = t.tm.history || {}, v = verdict(t.tm.verdict);
+    var hn = h.triggered || 0, hR = hn ? h.avg_R : null;
+    var key;
+    if (v.tone === "good" && m.avg_R > 0 && hn >= 10 && hR > 0) key = "pick";
+    else if (v.tone === "bad" || (m.avg_R <= 0 && (hR == null || hR <= 0))) key = "pass";
+    else key = "watch";
+    return { key: key, score: m.avg_R + (hn >= 10 ? 0.5 * hR : 0) };
+  }
+  function gradeBadge(g) {
+    var tone = { pick: "good", watch: "flat", pass: "bad", none: "flat" }[g.key];
+    return '<span class="grade ' + tone + '">' + GRADE[g.key] + "</span>";
+  }
+
   function getJSON(url) {
     return fetch(url, { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error(url + " → HTTP " + r.status);
@@ -98,10 +115,11 @@
   }
 
   function tradeCard(t, news) {
-    var head = '<h2>' + esc(t.symbol) + ' <span class="px">' + esc(t.hit.at || "") + " 진입가 " + px(t.hit.price) +
+    var g = grade(t);
+    var head = '<h2>' + esc(t.symbol) + " " + gradeBadge(g) + ' <span class="px">' + esc(t.hit.at || "") + " 진입가 " + px(t.hit.price) +
       " · 범위 " + px(t.hit.or_low) + " ~ " + px(t.hit.or_high) + " (+" + esc(t.hit.pct_over) + "%)</span></h2>";
     if (!t.tm) {
-      return '<article class="card">' + head + '<p class="err">' + esc(t.error || "결과 없음") + "</p></article>";
+      return '<article class="card" id="c-' + esc(t.symbol) + '">' + head + '<p class="err">' + esc(t.error || "결과 없음") + "</p></article>";
     }
     var tm = t.tm, p = tm.plan, m = tm.mc, h = tm.history || {}, v = verdict(tm.verdict);
     var levels = '<div class="levels">' +
@@ -145,8 +163,11 @@
         }).join("") + "</ul>";
     }
 
-    return '<article class="card">' + head +
-      '<div class="verdict ' + v.tone + '">' + esc(v.ko) + "</div>" +
+    var how = '<p class="how">📋 <strong>매수</strong> ' + px(p.entry) + " 근처 → <strong>매도</strong>: " +
+      '<span class="o-target">' + px(p.target) + " 닿으면 익절</span> · " +
+      '<span class="o-stop">' + px(p.stop) + " 깨지면 손절</span> · 둘 다 아니면 " + esc(p.flat_by || "3:55 PM") + " 전에 정리</p>";
+    return '<article class="card" id="c-' + esc(t.symbol) + '">' + head + how +
+      '<div class="verdict ' + v.tone + '">1만 번 판정: ' + esc(v.ko) + "</div>" +
       '<div class="muted">' + esc(tm.verdict) + "</div>" + levels + odds +
       '<div class="grid2"><div class="panel"><h3>남은 장 1만 번 — 가격 범위</h3>' + fanChart(tm) + "</div>" +
       '<div class="panel"><h3>장 마감 가격 분포</h3>' + closeHist(tm) + "</div></div>" + hist + newsHtml +
@@ -159,7 +180,8 @@
     var stat = function (k, v) { return '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + "</div></div>"; };
     $("summary").innerHTML =
       stat("기준 시각 (뉴욕)", esc(doc.date) + " " + esc(doc.at)) +
-      stat("스캔한 종목", s.scanned != null ? s.scanned : "–") +
+      stat("스캔한 종목" + ({ all: " (미국 전체)", list: " (관심 목록)", tickers: " (직접 고름)" }[doc.scope] || ""),
+        s.scanned != null ? Number(s.scanned).toLocaleString() : "–") +
       stat("범위 위로 마감", s.hits != null ? s.hits : "–") +
       stat("1만 번 돌린 종목", doc.trades.length);
 
@@ -174,8 +196,46 @@
     } else if (doc.status === "no_hits") {
       html += '<div class="notice">10:15까지 개장 범위 위로 마감한 종목이 없었습니다. 오늘은 쉬는 날.</div>';
     }
-    html += doc.trades.map(function (t) { return tradeCard(t, (doc.news || {})[t.symbol]); }).join("");
+    var trades = doc.trades.map(function (t) { return { t: t, g: grade(t) }; });
+    trades.sort(function (x, y) { return y.g.score - x.g.score; });
+    var counts = { pick: 0, watch: 0, pass: 0, none: 0 };
+    trades.forEach(function (x) { counts[x.g.key]++; });
+    if (trades.length) {
+      html += '<section class="card rank"><h2>오늘의 추천 순위</h2>' +
+        '<p class="muted">1만 번 시뮬레이션 평균 R과 지난 59일 같은 자리의 실제 평균 R을 합친 점수 순. ' +
+        "<strong>후보</strong> = 두 결과가 모두 목표 쪽을 가리키고 지난 기록이 10번 이상. 그 외 대부분은 동전 던지기라 패스가 기본입니다.</p>" +
+        '<div class="filters">' + ["all", "pick", "watch", "pass"].map(function (k) {
+          var n = k === "all" ? trades.length : counts[k];
+          return '<button data-f="' + k + '"' + (state.filter === k ? ' class="on"' : "") + ">" +
+            (k === "all" ? "전체" : GRADE[k]) + " " + n + "</button>";
+        }).join("") + '<input id="q" type="search" placeholder="종목 검색 (예: NVDA)" value="' + esc(state.q) + '"></div>' +
+        '<div class="table-wrap"><table><tr><th>#</th><th>종목</th><th>판정</th><th>매수</th><th>익절</th><th>손절</th>' +
+        "<th>목표 먼저</th><th>손절 먼저</th><th>평균 R</th><th>지난 기록</th></tr>" +
+        trades.map(function (x, i) {
+          var t = x.t, tm = t.tm;
+          if (!tm) return '<tr data-g="none" data-s="' + esc(t.symbol) + '"><td>' + (i + 1) + '</td><td><a href="#c-' + esc(t.symbol) + '">' +
+            esc(t.symbol) + "</a></td><td>" + gradeBadge(x.g) + '</td><td colspan="7" class="muted">' + esc(t.error || "") + "</td></tr>";
+          var m = tm.mc, h = tm.history || {}, p = tm.plan;
+          return '<tr data-g="' + x.g.key + '" data-s="' + esc(t.symbol) + '"><td>' + (i + 1) + '</td><td><a href="#c-' + esc(t.symbol) + '">' +
+            esc(t.symbol) + "</a></td><td>" + gradeBadge(x.g) + "</td><td>" + px(p.entry) + '</td><td class="o-target">' + px(p.target) +
+            '</td><td class="o-stop">' + px(p.stop) + "</td><td>" + pct(m.p_target) + "</td><td>" + pct(m.p_stop) + "</td><td>" +
+            (m.avg_R > 0 ? "+" : "") + m.avg_R.toFixed(2) + "</td><td>" +
+            (h.triggered ? h.target + "승 " + h.stop + "패 / " + h.triggered : "–") + "</td></tr>";
+        }).join("") + "</table></div></section>";
+    }
+    html += trades.map(function (x) {
+      return '<div data-g="' + x.g.key + '" data-s="' + esc(x.t.symbol) + '">' + tradeCard(x.t, (doc.news || {})[x.t.symbol]) + "</div>";
+    }).join("");
     $("trades").innerHTML = html;
+    applyFilter();
+    Array.prototype.forEach.call(document.querySelectorAll(".filters button"), function (b) {
+      b.addEventListener("click", function () {
+        state.filter = b.getAttribute("data-f");
+        Array.prototype.forEach.call(document.querySelectorAll(".filters button"), function (o) { o.classList.toggle("on", o === b); });
+        applyFilter();
+      });
+    });
+    if ($("q")) $("q").addEventListener("input", function () { state.q = this.value; applyFilter(); });
 
     var list = s.list || [];
     $("scanlist").innerHTML = list.length ? '<details class="card"><summary>스캐너가 찾은 종목 전체 ' + list.length +
@@ -184,6 +244,16 @@
         return "<tr><td>" + esc(h.symbol) + "</td><td>" + esc(h.at) + "</td><td>" + px(h.price) + "</td><td>" +
           px(h.or_low) + " ~ " + px(h.or_high) + "</td><td>+" + esc(h.pct_over) + "%</td></tr>";
       }).join("") + "</table></div></details>" : "";
+  }
+
+  var state = { filter: "all", q: "" };
+  function applyFilter() {
+    var q = state.q.trim().toUpperCase();
+    Array.prototype.forEach.call(document.querySelectorAll("#trades [data-g]"), function (el) {
+      var ok = (state.filter === "all" || el.getAttribute("data-g") === state.filter) &&
+        (!q || el.getAttribute("data-s").indexOf(q) === 0);
+      el.style.display = ok ? "" : "none";
+    });
   }
 
   function load(id) {
@@ -200,7 +270,7 @@
       return;
     }
     $("day").innerHTML = days.map(function (d) {
-      return '<option value="' + esc(d.id) + '">' + esc(d.date) + (d.demo ? " (데모)" : "") +
+      return '<option value="' + esc(d.id) + '">' + esc(d.date) + (d.demo ? " (데모)" : d.scope === "tickers" ? " (직접 고름)" : "") +
         " · 돌파 " + d.hits + "개</option>";
     }).join("");
     $("updated").textContent = "마지막 갱신 " + new Date(idx.updated_at).toLocaleString("ko-KR");
