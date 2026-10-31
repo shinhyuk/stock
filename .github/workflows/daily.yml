@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   pages: write
+  id-token: write
 
 concurrency:
   group: daily
@@ -25,6 +26,9 @@ concurrency:
 jobs:
   run-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,10 +67,11 @@ jobs:
           git commit -q -m "deploy ${GITHUB_SHA::7}"
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages
 
-      # 봇이 올린 커밋으로는 Pages 빌드가 자동으로 안 돌 때가 있어서 직접 요청합니다.
-      - name: Request a Pages build
-        run: |
-          curl -fsS -X POST \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pages/builds"
+      # 저장소 Settings → Pages → Source 가 "GitHub Actions" 이면 여기서 바로 배포됩니다.
+      # ("Deploy from a branch" 상태면 이 단계는 건너뛰고 gh-pages 브랜치가 쓰입니다.)
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
