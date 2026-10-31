@@ -32,16 +32,17 @@ jobs:
           python-version: "3.12"
 
       - name: Run the skills (scanner → exit → time machine → news)
-        if: github.event_name != 'push'
         run: |
-          if [ "${{ inputs.demo }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # 코드만 바뀐 푸시는 다시 배포만. 데이터가 아직 하나도 없으면 원문 예시(데모)로 첫 화면을 채웁니다.
+            [ -f site/data/index.json ] || python3 pipeline/run_daily.py --demo
+          elif [ "${{ inputs.demo }}" = "true" ]; then
             python3 pipeline/run_daily.py --demo
           else
             python3 pipeline/run_daily.py
           fi
 
       - name: Save the results
-        if: github.event_name != 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
