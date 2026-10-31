@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>사기 전에 1만 번</title>
+<meta name="description" content="day-trader-skill로 매일 미국 주식 개장 돌파 종목을 찾고, 사기 전에 1만 번 돌려 본 결과">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8E%B2%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>사기 전에 1만 번</h1>
+    <p class="sub">미국 주식 개장 15분 범위 돌파 → 손절·목표 → 남은 장 10,000번 시뮬레이션. 매일 뉴욕 10:15 기준.</p>
+    <div class="controls">
+      <label for="day">날짜</label>
+      <select id="day"></select>
+      <span id="updated" class="muted"></span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="summary" class="summary"></section>
+  <section id="trades"></section>
+  <section id="scanlist"></section>
+</main>
+
+<footer class="wrap foot">
+  <p><strong>투자 권유가 아닙니다.</strong> 타임머신은 각 종목의 최근 60일 5분봉으로 만든 가상의 장이며 예측이 아닙니다.
+    실적·뉴스·거래정지처럼 그 60일에 없던 일은 반영하지 못합니다. 데이터는 야후 파이낸스(비공식, 무료)라 늦거나 빠질 수 있습니다.
+    이 페이지는 주문을 내지 않습니다.</p>
+  <p class="muted">도구: <a href="https://github.com/Jakeschincariol/day-trader-skill">day-trader-skill</a> (MIT, Jake Schincariol) — Anthropic 공식 기능 아님.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

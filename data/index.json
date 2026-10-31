@@ -1,0 +1,16 @@
+{
+ "days": [
+  {
+   "id": "2026-10-19-demo",
+   "date": "2026-10-19",
+   "demo": true,
+   "status": "ok",
+   "hits": 41,
+   "replayed": 1,
+   "verdicts": [
+    "Close to a coin flip"
+   ]
+  }
+ ],
+ "updated_at": "2026-10-31T02:34:20Z"
+}
