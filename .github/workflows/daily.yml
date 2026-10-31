@@ -2,9 +2,11 @@ name: daily
 
 on:
   schedule:
+    # 뉴욕 10:16 직후에 돌도록 두 번 걸어 둡니다: 14:16 UTC(서머타임) / 15:16 UTC(겨울).
+    # 맞지 않는 쪽은 run_daily.py --scheduled 가 알아서 건너뜁니다. 스캔은 항상 10:15 기준.
     # 장이 닫혀 있을 때 수동 실행하면 가장 최근 장(지난 6일 안)을 돌립니다.
-    # 평일 15:40 UTC = 뉴욕 10:40 (겨울) / 11:40 (서머타임). 스캔은 항상 10:15 기준으로 잘라서 봅니다.
-    - cron: "40 15 * * 1-5"
+    - cron: "16 14 * * 1-5"
+    - cron: "16 15 * * 1-5"
   workflow_dispatch:
     inputs:
       tickers:
@@ -52,6 +54,8 @@ jobs:
           if [ "$EVENT" = "push" ]; then
             # 코드만 바뀐 푸시는 다시 배포만. 실제 장 결과가 아직 하나도 없으면 가장 최근 장으로 한 번 돌립니다.
             ls site/data/days 2>/dev/null | grep -qv demo || python3 pipeline/run_daily.py
+          elif [ "$EVENT" = "schedule" ]; then
+            python3 pipeline/run_daily.py --scheduled
           elif [ -n "$TICKERS" ]; then
             python3 pipeline/run_daily.py --tickers "$TICKERS"
           else
@@ -69,6 +73,21 @@ jobs:
           git add site/data
           git diff --cached --quiet || git commit -m "data: $(date -u +%Y-%m-%d) run"
           git push
+
+      # 자동매매(Supabase)를 연결했으면 오늘의 후보를 보냅니다. 연결 전이거나 지난 장 다시 돌리기면 아무것도 안 보냅니다.
+      - name: Send today's picks to the auto trader
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.tickers == '' && startsWith(inputs.scope, 'all'))
+        env:
+          TRADER_URL: ${{ vars.TRADER_URL }}
+          TRADER_SECRET: ${{ secrets.TRADER_SECRET }}
+        run: python3 pipeline/send_plans.py
+
+      # 사이트가 자동매매 현황을 읽어 갈 주소 (읽기 전용 status 만 공개)
+      - name: Point the site at the auto trader
+        env:
+          TRADER_URL: ${{ vars.TRADER_URL }}
+        run: |
+          if [ -n "$TRADER_URL" ]; then printf '{"status_url": "%s"}\n' "$TRADER_URL" > site/trader.json; fi
 
       - uses: actions/upload-pages-artifact@v3
         with:

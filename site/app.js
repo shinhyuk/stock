@@ -32,6 +32,7 @@
   // 일별 추천: 1만 번 결과와 지난 날 실제 기록이 둘 다 같은 쪽을 가리킬 때만 '후보'.
   var GRADE = { pick: "오늘의 후보", watch: "애매", pass: "패스", none: "결과 없음" };
   function grade(t) {
+    if (t.grade) return { key: t.grade, score: t.score };  // run_daily.py's grade(), the same rule
     if (!t.tm) return { key: "none", score: -99 };
     var m = t.tm.mc, h = t.tm.history || {}, v = verdict(t.tm.verdict);
     var hn = h.triggered || 0, hR = hn ? h.avg_R : null;
@@ -280,6 +281,52 @@
       $("trades").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
     });
   }
+
+  // 자동매매 현황: Supabase 함수의 읽기 전용 status (site/trader.json 이 있을 때만)
+  var STATUS = { planned: "대기", buying: "매수 중", open: "보유", selling: "매도 중", closed: "청산", skipped: "건너뜀", error: "오류" };
+  var REASON = { target: "익절", stop: "손절", close: "장 마감 정리", manual: "수동" };
+  function money(x) { return x == null ? "–" : (x > 0 ? "+" : x < 0 ? "−" : "") + "$" + Math.abs(x).toFixed(2); }
+  function renderTrader(st) {
+    var tr = st.trades || [], closed = tr.filter(function (t) { return t.status === "closed"; });
+    var total = closed.reduce(function (a, t) { return a + (Number(t.pnl_usd) || 0); }, 0);
+    var wins = closed.filter(function (t) { return t.pnl_usd > 0; }).length;
+    var head = '<h2>자동매매 <span class="grade ' + (st.mode === "real" ? "bad" : "flat") + '">' +
+      (st.mode === "real" ? "실전" : "모의투자") + '</span> <span class="grade ' + (st.enabled ? "good" : "flat") + '">' +
+      (st.enabled ? "새 매수 켜짐" : "새 매수 꺼짐") + "</span></h2>" +
+      '<p class="muted">한국투자증권 · 동시 ' + esc(st.config.max_positions) + "종목 · 1회 최대 손실 $" + esc(st.config.max_loss_usd) +
+      " · 하루 손실 한도 $" + esc(st.config.daily_loss_usd) + " · " + esc(st.config.entry_deadline) + "까지 매수, " +
+      esc(st.config.flat_by) + "에 전부 정리 (뉴욕 시각)</p>";
+    var stats = '<div class="levels"><div><div class="k">누적 손익 (청산 ' + closed.length + '건)</div><div class="v ' +
+      (total >= 0 ? "o-target" : "o-stop") + '">' + money(total) + "</div></div>" +
+      '<div><div class="k">이긴 거래</div><div class="v">' + wins + " / " + closed.length + "</div></div>" +
+      '<div><div class="k">갱신</div><div class="v">' + new Date(st.now).toLocaleTimeString("ko-KR") + "</div></div></div>";
+    var rows = tr.map(function (t) {
+      return "<tr><td>" + esc(t.day) + "</td><td><strong>" + esc(t.symbol) + "</strong>" + (t.inverse ? ' <span class="tag">인버스</span>' : "") +
+        "</td><td>" + (STATUS[t.status] || esc(t.status)) + "</td><td>" + (t.qty || "–") + "</td><td>" + px(t.buy_price || t.entry) +
+        '</td><td class="o-target">' + px(t.target) + '</td><td class="o-stop">' + px(t.stop) + "</td><td>" + px(t.sell_price) +
+        "</td><td>" + (REASON[t.sell_reason] || "") + '</td><td class="' + (t.pnl_usd > 0 ? "o-target" : t.pnl_usd < 0 ? "o-stop" : "") + '">' +
+        (t.pnl_usd == null ? "" : money(Number(t.pnl_usd))) + '</td><td class="muted">' + esc(t.note || "") + "</td></tr>";
+    }).join("");
+    var table = tr.length ? '<div class="table-wrap"><table class="nowrap"><tr><th>날짜</th><th>종목</th><th>상태</th><th>수량</th><th>매수가</th>' +
+      "<th>익절</th><th>손절</th><th>매도가</th><th>사유</th><th>손익</th><th>메모</th></tr>" + rows + "</table></div>" :
+      '<p class="muted">아직 주문이 없습니다. 평일 뉴욕 10:15 이후 후보가 나오면 여기 표시됩니다.</p>';
+    var logs = (st.log || []).map(function (l) {
+      return '<li class="' + (l.level === "error" ? "err" : l.level === "warn" ? "o-stop" : "") + '">' +
+        new Date(l.at).toLocaleString("ko-KR") + " — " + esc(l.msg) + "</li>";
+    }).join("");
+    $("trader").innerHTML = '<div class="card">' + head + stats + table +
+      (logs ? "<details><summary>최근 기록 " + st.log.length + "건</summary><ul class=\"news\">" + logs + "</ul></details>" : "") + "</div>";
+  }
+  getJSON("trader.json").then(function (cfg) {
+    if (!cfg.status_url) return;
+    var poll = function () {
+      getJSON(cfg.status_url + "?action=status").then(renderTrader).catch(function (e) {
+        $("trader").innerHTML = '<div class="notice">자동매매 현황을 못 불러왔습니다: ' + esc(e.message) + "</div>";
+      });
+    };
+    poll();
+    setInterval(poll, 60000);
+  }).catch(function () {});
 
   getJSON("data/index.json").then(function (idx) {
     var days = idx.days || [];

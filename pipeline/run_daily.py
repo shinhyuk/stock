@@ -75,6 +75,26 @@ def last_session(now_utc, at):
     return day.isoformat()
 
 
+def grade(trade):
+    """The dashboard's call for one replayed breakout, also what the auto trader buys.
+    pick: the 10,000 replays and the real past sessions both lean to the target (10+ past fires);
+    pass: the replays lean to the stop, or both averages are at or below zero; watch: the rest."""
+    tm = trade.get("tm")
+    if not tm:
+        return "none", -99.0
+    mc, hist = tm["mc"], tm.get("history") or {}
+    n = hist.get("triggered") or 0
+    h_r = hist.get("avg_R") if n else None
+    good, bad = "toward the target" in tm["verdict"], "toward the stop" in tm["verdict"]
+    if good and mc["avg_R"] > 0 and n >= 10 and h_r > 0:
+        key = "pick"
+    elif bad or (mc["avg_R"] <= 0 and (h_r is None or h_r <= 0)):
+        key = "pass"
+    else:
+        key = "watch"
+    return key, round(mc["avg_R"] + (0.5 * h_r if n >= 10 else 0), 4)
+
+
 def slim_tm(doc):
     """Keep what the dashboard draws; the 2,000 sample paths are too heavy for a web page."""
     mc = {k: v for k, v in doc["mc"].items() if k != "sample_paths"}
@@ -110,6 +130,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--demo", action="store_true", help="the TSLA 2026-10-19 example from saved data")
     ap.add_argument("--at", default="10:15", help="scan the opening-range breakouts up to this New York time")
+    ap.add_argument("--scheduled", action="store_true",
+                    help="cron run: do nothing before --at New York time, or when today's run already exists")
     ap.add_argument("--date", help="YYYY-MM-DD within the last 6 days (default: the latest session, see last_session)")
     ap.add_argument("--list", action="store_true", help="scan pipeline/universe.txt instead of every US stock")
     ap.add_argument("--symbols", default=os.path.join(ROOT, "pipeline", "universe.txt"))
@@ -119,6 +141,18 @@ def main(argv=None):
     ap.add_argument("--replays", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=19)
     a = ap.parse_args(argv)
+
+    if a.scheduled and NY:
+        local = datetime.datetime.now(datetime.timezone.utc).astimezone(NY)
+        if local.weekday() >= 5 or local.strftime("%H:%M") < a.at:
+            log("Scheduled run at %s New York: before %s or a weekend, nothing to do." % (local.strftime("%a %H:%M"), a.at))
+            return 0
+        if last_session(local, a.at) != local.date().isoformat():
+            log("No session today (NYSE holiday), nothing to do.")
+            return 0
+        if os.path.exists(os.path.join(DATA, "days", local.date().isoformat() + ".json")):
+            log("Today's run already exists, nothing to do.")
+            return 0
 
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(os.path.join(DATA, "days"), exist_ok=True)
@@ -161,11 +195,21 @@ def main(argv=None):
         day_doc["message"] = (err.splitlines() or ["scanner failed"])[-1]
     else:
         hits = scan.get("hits") or []
+        if scope == "all":
+            # inverse ETFs are not in Nasdaq Trader's stock list: scan them too, they break out on down days
+            code, inv, err = tool("trader-scanner", "scan.py", "orb", "--symbols",
+                                  ",".join(read_symbols(os.path.join(ROOT, "pipeline", "inverse.txt"))),
+                                  "--now", now_ny, "--out", os.path.join(WORK, "watchlist-inverse.json"),
+                                  "--json", "--quiet")
+            have = {h["symbol"] for h in hits}
+            for h in (inv or {}).get("hits") or []:
+                if h["symbol"] not in have:
+                    hits.append(dict(h, inverse=True))
         day_doc["scan"] = {"as_of": scan.get("as_of"), "universe": scan.get("universe"),
                            "scanned": scan.get("scanned"), "failed": scan.get("failed"), "hits": len(hits),
                            "or_minutes": scan.get("or_minutes"), "note": scan.get("note"),
                            "unconfirmed": scan.get("unconfirmed"),
-                           "list": [{k: h.get(k) for k in ("symbol", "price", "at", "or_high", "or_low", "pct_over")}
+                           "list": [{k: h.get(k) for k in ("symbol", "price", "at", "or_high", "or_low", "pct_over", "inverse")}
                                     for h in hits]}
         picks = [h for h in hits if h.get("or_high") is not None and h.get("or_low") is not None]
         if only is not None:
@@ -203,6 +247,8 @@ def main(argv=None):
         # a few at a time: each one is a single chart request, then pure arithmetic
         with concurrent.futures.ThreadPoolExecutor(max_workers=a.workers) as pool:
             day_doc["trades"] = list(pool.map(replay, picks))
+        for t in day_doc["trades"]:
+            t["grade"], t["score"] = grade(t)
 
         # 4. /trader-news: the morning's headlines for what got replayed (no SEC, no key needed)
         # only for what did not lean toward the stop, so the headline requests stay few

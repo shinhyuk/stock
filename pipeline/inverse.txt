@@ -1,0 +1,21 @@
+# 인버스(하락에 베팅하는) ETF. 미국 전체 스캔 때 함께 스캔합니다. 지수가 떨어지는 날 이쪽이 개장 범위를 위로 뚫습니다.
+# 레버리지(2~3배) 상품은 하루 단위로만 들고 있도록 설계된 상품입니다.
+SH
+PSQ
+DOG
+RWM
+SDS
+QID
+DXD
+TWM
+SPXU
+SPXS
+SQQQ
+SDOW
+TZA
+SRTY
+SOXS
+TECS
+FAZ
+LABD
+YANG

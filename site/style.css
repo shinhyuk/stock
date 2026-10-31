@@ -100,3 +100,4 @@ th { color: var(--muted); font-weight: 600; }
 .filters button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .filters input { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--ink); min-width: 0; flex: 1 1 160px; max-width: 240px; }
 .rank th, .rank td { white-space: nowrap; }
+.nowrap th, .nowrap td { white-space: nowrap; }
