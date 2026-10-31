@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: daily
@@ -61,3 +62,11 @@ jobs:
           git add -A
           git commit -q -m "deploy ${GITHUB_SHA::7}"
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages
+
+      # 봇이 올린 커밋으로는 Pages 빌드가 자동으로 안 돌 때가 있어서 직접 요청합니다.
+      - name: Request a Pages build
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pages/builds"
