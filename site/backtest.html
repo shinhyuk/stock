@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>엔비디아 가상 매매</title>
+<meta name="description" content="엔비디아와 인버스 ETF를 시점에 따라 사고팔았다면: 지난 60거래일 가상 매매 결과">
+<link rel="stylesheet" href="style.css">
+<style>
+  :root { --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --grid: #e3e2dd; }
+  @media (prefers-color-scheme: dark) { :root { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --grid: #34332f; } }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; gap: 2px; flex-wrap: wrap; }
+  .seg button { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--ink); padding: 5px 12px; border-radius: 999px; cursor: pointer; }
+  .seg button.on { background: var(--ink); color: var(--bg); }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 4px 0 16px; }
+  .hero { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .hero .card { margin: 0; }
+  .hero .k { color: var(--muted); font-size: 13px; }
+  .hero .v { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .hero .s { color: var(--muted); font-size: 13px; }
+  .chart-wrap { position: relative; }
+  .tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.12); display: none; white-space: nowrap; z-index: 2; }
+  .tip i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .legend i.line { width: 14px; height: 3px; }
+  .verdict-box { border-radius: 14px; padding: 14px 16px; margin-bottom: 16px; border: 1px solid var(--line); background: var(--card); }
+  .verdict-box strong { font-size: 17px; }
+  td.num, th.num { text-align: right; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="muted" style="margin:0 0 6px"><a href="./">← 매일 후보로 돌아가기</a></p>
+    <h1 id="title">엔비디아 ↔ 인버스 가상 매매</h1>
+    <p class="sub" id="sub"></p>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="verdict" class="verdict-box"></div>
+
+  <div class="bar">
+    <div class="seg" id="seg-strategy"></div>
+    <div class="seg" id="seg-r"></div>
+    <div class="seg" id="seg-size"></div>
+  </div>
+
+  <section class="hero" id="hero"></section>
+
+  <section class="card">
+    <h2 style="font-size:17px;margin:0 0 4px">누적 손익 (수수료 뺀 뒤, 원)</h2>
+    <p class="muted" style="margin:0 0 8px" id="chart-note"></p>
+    <div class="chart-wrap" id="chart-wrap"><svg id="chart" role="img" aria-label="날짜별 누적 손익"></svg><div class="tip" id="tip"></div></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:17px;margin:0 0 8px">날마다 무엇을 사고팔았나</h2>
+    <div class="table-wrap"><table class="nowrap" id="table"></table></div>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:17px;margin:0 0 8px">규칙</h2>
+    <ul class="news" id="rules"></ul>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <p><strong>투자 권유가 아닙니다.</strong> 지난 60거래일 5분봉으로 다시 돌려 본 가상 결과이며 앞으로도 같다는 보장이 없습니다.
+    실제로는 체결 지연·호가 차이로 더 나빠질 수 있습니다. 데이터: 야후 파이낸스.</p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function won(x, sign) {
+    var r = Math.round(x / 100) * 100, a = Math.abs(r);
+    var t = a >= 10000 ? (a / 10000).toFixed(a >= 100000 ? 0 : 1).replace(/\.0$/, "") + "만" : a.toLocaleString("ko-KR");
+    return (sign && r > 0 ? "+" : r < 0 ? "−" : "") + t + "원";
+  }
+  var REASON = { target: "익절", stop: "손절", close: "마감 정리" };
+  var state = { strategy: "both", r: 1, all_in: false };
+  var D, LABEL, COLOR = { long: "var(--s1)", short: "var(--s2)", both: "var(--s3)" };
+
+  function seg(id, items, key) {
+    $(id).innerHTML = items.map(function (it) {
+      return '<button data-v="' + it[0] + '"' + (String(state[key]) === String(it[0]) ? ' class="on"' : "") + ">" + it[1] + "</button>";
+    }).join("");
+    Array.prototype.forEach.call($(id).querySelectorAll("button"), function (b) {
+      b.onclick = function () {
+        var v = b.getAttribute("data-v");
+        state[key] = key === "r" ? Number(v) : key === "all_in" ? v === "true" : v;
+        draw();
+      };
+    });
+  }
+  function run(strategy) {
+    return D.runs.filter(function (x) { return x.strategy === strategy && x.r === state.r && x.all_in === state.all_in; })[0];
+  }
+
+  function chart() {
+    var keys = ["long", "short", "both"], days = D.days, n = days.length;
+    var wrap = $("chart-wrap"), W = Math.max(320, wrap.clientWidth), H = 280, L = 64, R = 92, T = 12, B = 26;
+    var series = keys.map(function (k) { return { k: k, c: run(k).summary.curve }; });
+    var lo = 0, hi = 0;
+    series.forEach(function (s) { s.c.forEach(function (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); }); });
+    var pad = (hi - lo) * 0.08 || 1000; lo -= pad; hi += pad;
+    var x = function (i) { return L + i * (W - L - R) / (n - 1); };
+    var y = function (v) { return T + (hi - v) * (H - T - B) / (hi - lo); };
+    var g = "";
+    for (var j = 0; j <= 4; j++) {
+      var v = lo + (hi - lo) * j / 4;
+      g += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="var(--grid)" stroke-width="1"/>' +
+        '<text x="' + (L - 8) + '" y="' + (y(v) + 4) + '" text-anchor="end">' + won(v, true) + "</text>";
+    }
+    g += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(0) + '" y2="' + y(0) + '" stroke="var(--muted)" stroke-width="1"/>';
+    [0, Math.floor((n - 1) / 2), n - 1].forEach(function (i) {
+      g += '<text x="' + x(i) + '" y="' + (H - 6) + '" text-anchor="middle">' + days[i].slice(5).replace("-", "/") + "</text>";
+    });
+    // end labels, nudged apart so they never overlap
+    var ends = series.map(function (s) { return { k: s.k, v: s.c[n - 1], y: y(s.c[n - 1]) }; }).sort(function (a, b) { return a.y - b.y; });
+    for (var e = 1; e < ends.length; e++) if (ends[e].y - ends[e - 1].y < 15) ends[e].y = ends[e - 1].y + 15;
+    series.forEach(function (s) {
+      var on = s.k === state.strategy;
+      g += '<path d="M' + s.c.map(function (v, i) { return x(i).toFixed(1) + "," + y(v).toFixed(1); }).join("L") + '" fill="none" stroke="' +
+        COLOR[s.k] + '" stroke-width="' + (on ? 2.5 : 2) + '" stroke-opacity="' + (on ? 1 : 0.45) + '" stroke-linejoin="round"/>';
+    });
+    ends.forEach(function (en) {
+      g += '<circle cx="' + x(n - 1) + '" cy="' + y(en.v) + '" r="4" fill="' + COLOR[en.k] + '" stroke="var(--card)" stroke-width="2"/>' +
+        '<text x="' + (x(n - 1) + 8) + '" y="' + (en.y + 4) + '" style="fill:var(--ink)">' + won(en.v, true) + "</text>";
+    });
+    g += '<line id="cross" x1="0" x2="0" y1="' + T + '" y2="' + (H - B) + '" stroke="var(--muted)" stroke-dasharray="3 3" visibility="hidden"/>' +
+      '<rect x="' + L + '" y="' + T + '" width="' + (W - L - R) + '" height="' + (H - T - B) + '" fill="transparent" id="hit"/>';
+    var svg = $("chart");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.innerHTML = g;
+    $("legend").innerHTML = keys.map(function (k) { return '<span><i class="line" style="background:' + COLOR[k] + '"></i>' + LABEL[k] + "</span>"; }).join("");
+    var hit = $("hit"), tip = $("tip"), cross = $("cross");
+    function show(evt) {
+      var r = svg.getBoundingClientRect(), px = (evt.clientX - r.left) * W / r.width;
+      var i = Math.max(0, Math.min(n - 1, Math.round((px - L) * (n - 1) / (W - L - R))));
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+      tip.innerHTML = "<strong>" + days[i] + "</strong><br>" + keys.map(function (k) {
+        var t = run(k).trades[i];
+        var what = t && t.pnl_krw != null ? t.symbol + " " + REASON[t.reason] + " " + won(t.pnl_krw, true) : "거래 없음";
+        return '<i style="background:' + COLOR[k] + '"></i>' + LABEL[k] + ": 누적 " + won(series[keys.indexOf(k)].c[i], true) +
+          ' <span class="muted">(' + what + ")</span>";
+      }).join("<br>");
+      tip.style.display = "block";
+      var left = x(i) * r.width / W + 12;
+      if (left + tip.offsetWidth > r.width) left = x(i) * r.width / W - tip.offsetWidth - 12;
+      tip.style.left = Math.max(0, left) + "px"; tip.style.top = "8px";
+    }
+    hit.addEventListener("mousemove", show);
+    hit.addEventListener("touchstart", function (e) { show(e.touches[0]); }, { passive: true });
+    hit.addEventListener("mouseleave", function () { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); });
+  }
+
+  function draw() {
+    seg("seg-strategy", [["long", LABEL.long], ["short", LABEL.short], ["both", LABEL.both]], "strategy");
+    seg("seg-r", [[1, "익절 = 위험의 1배"], [2, "익절 = 위험의 2배"]], "r");
+    seg("seg-size", [[false, "규칙대로 (1번에 최대 1.3만원 손실)"], [true, "100만원 전부"]], "all_in");
+    var cur = run(state.strategy), s = cur.summary;
+    var tile = function (k, v, sub, cls) {
+      return '<div class="card"><div class="k">' + k + '</div><div class="v ' + (cls || "") + '">' + v + '</div><div class="s">' + sub + "</div></div>";
+    };
+    $("hero").innerHTML =
+      tile("60일 동안 손익 (수수료 뺀 뒤)", won(s.total_krw, true), "수수료 빼기 전 " + won(s.gross_krw, true) + " · 수수료 " + won(s.fees_krw),
+        s.total_krw >= 0 ? "o-target" : "o-stop") +
+      tile("이긴 날", s.wins + " / " + s.n, "익절 " + s.reasons.target + " · 손절 " + s.reasons.stop + " · 마감 정리 " + s.reasons.close) +
+      tile("가장 많이 빠졌을 때", won(s.max_drawdown_krw, true), "최고 " + won(s.best_krw, true) + " · 최악 " + won(s.worst_krw, true), "o-stop") +
+      tile("그냥 들고 있었다면", won(D.hold[D.long.symbol].pnl_krw, true), D.long.symbol + " (인버스 " + D.short.symbol + "는 " +
+        won(D.hold[D.short.symbol].pnl_krw, true) + ")");
+    $("chart-note").textContent = "선 3개 = 세 가지 방법. 굵은 선이 지금 고른 방법. 마우스를 올리면 그날 무엇을 샀는지 나옵니다.";
+    chart();
+    var rows = cur.trades.map(function (t, i) {
+      if (!t) return "";
+      if (t.pnl_krw == null) return "<tr><td>" + D.days[i] + "</td><td>" + esc(t.symbol) + '</td><td colspan="7" class="muted">' + esc(t.skip) + "</td></tr>";
+      return "<tr><td>" + D.days[i] + "</td><td><strong>" + esc(t.symbol) + "</strong>" + (t.symbol === D.short.symbol ? ' <span class="tag">인버스</span>' : "") +
+        "</td><td>" + t.in_t + " $" + t.entry.toFixed(2) + "</td><td>" + t.out_t + " $" + t.exit.toFixed(2) + '</td><td class="o-' + t.reason + '">' +
+        REASON[t.reason] + '</td><td class="num">' + t.qty + '주</td><td class="num">' + won(t.invest_krw) + '</td><td class="num ' +
+        (t.pnl_krw >= 0 ? "o-target" : "o-stop") + '">' + won(t.pnl_krw, true) + '</td><td class="num muted">' + won(t.fee_krw) + "</td></tr>";
+    }).join("");
+    $("table").innerHTML = '<tr><th>날짜</th><th>산 것</th><th>산 시각·가격</th><th>판 시각·가격</th><th>사유</th><th class="num">수량</th>' +
+      '<th class="num">투자금</th><th class="num">손익</th><th class="num">수수료</th></tr>' +
+      (rows || '<tr><td colspan="9" class="muted">거래 없음</td></tr>');
+  }
+
+  fetch("data/backtest/NVDA-NVD.json", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+    D = d;
+    LABEL = { long: "엔비디아만", short: "인버스만 (" + d.short.symbol + ")", both: "시점에 따라 둘 다" };
+    $("sub").textContent = d.days[0] + " ~ " + d.days[d.days.length - 1] + " · " + d.days.length + "거래일 · 100만 원 · 달러 1 = " +
+      Math.round(d.fx_krw).toLocaleString() + "원 · 수수료 매수·매도 각 " + (d.fee * 100) + "%";
+    var best = d.runs.slice().sort(function (a, b) { return b.summary.total_krw - a.summary.total_krw; })[0];
+    var gross = run("both").summary;
+    $("verdict").innerHTML = "<strong>" + (best.summary.total_krw > 0 ? "일부 방법은 이겼어요" : "어떤 방법으로 해도 손해였어요") + "</strong><br>" +
+      "가장 나은 방법도 " + won(best.summary.total_krw, true) + " (" + LABEL[best.strategy] + ", 익절 " + best.r + "배, " +
+      (best.all_in ? "100만원 전부" : "규칙대로") + "). 수수료를 빼기 전엔 '시점에 따라 둘 다'가 " + won(gross.gross_krw, true) +
+      "로 조금 남았지만, 하루 한 번 사고파는 수수료(매번 0.5%)가 그걸 다 먹었습니다.";
+    $("rules").innerHTML = [
+      "매일 9:30~9:45(뉴욕) 15분 동안의 최고가·최저가를 '개장 범위'로 잡습니다.",
+      "엔비디아가 범위 위로 5분봉 종가를 찍으면 엔비디아를, " + d.short.name + "(" + d.short.symbol + ", 엔비디아가 내리면 2배로 오름)가 찍으면 인버스를 삽니다. 11:30 이후엔 안 삽니다.",
+      "'시점에 따라 둘 다'는 그날 먼저 범위를 뚫은 쪽 하나만 삽니다. 하루 한 번.",
+      "손절 = 개장 범위 가운데. 익절 = 산 가격 + (산 가격 − 손절)×1배 또는 2배. 둘 다 아니면 15:50에 팝니다. 한 5분봉에서 둘 다 닿으면 손절로 칩니다.",
+      "'규칙대로'는 자동매매와 같습니다: 1번에 최대 $10(약 1.3만원)만 잃고, 한 종목에 45%까지만. '100만원 전부'는 매번 다 겁니다.",
+      "1만 번 시뮬레이션 필터('오늘의 후보')는 여기 빠져 있습니다. 돌파가 나온 날은 다 샀습니다.",
+    ].map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("");
+    draw();
+    window.addEventListener("resize", chart);
+  });
+})();
+</script>
+</body>
+</html>
