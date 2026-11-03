@@ -1,0 +1,116 @@
+name: trader-setup
+
+# 자동매매를 한 번에 설정하거나 켜고 끕니다. 휴대폰에서도: GitHub 앱(또는 브라우저) → Actions → trader-setup → Run workflow.
+# 먼저 저장소 Settings → Secrets and variables → Actions → Secrets 에 5개를 넣어 두세요 (docs/AUTOTRADE.md):
+#   SUPABASE_ACCESS_TOKEN, SUPABASE_PROJECT_REF, KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT
+# 하는 일: 테이블 만들기 → 함수 배포 → 함수 비밀값 → 1분 예약 → 새 매수 켜기/끄기 → 키·계좌 점검 (주문은 안 냄)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "모의투자(paper) / 실전(real)"
+        type: choice
+        options: [paper, real]
+        default: paper
+      buying:
+        description: "새 매수 (켜기 / 끄기 / 그대로)"
+        type: choice
+        options: ["그대로", "켜기", "끄기"]
+        default: "그대로"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trader-setup
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+      KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      KIS_ACCOUNT: ${{ secrets.KIS_ACCOUNT }}
+      MODE: ${{ inputs.mode }}
+      BUYING: ${{ inputs.buying }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the secrets are there
+        run: |
+          missing=""
+          for k in SUPABASE_ACCESS_TOKEN REF KIS_APP_KEY KIS_APP_SECRET KIS_ACCOUNT; do
+            [ -n "${!k}" ] || missing="$missing $k"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::GitHub Secrets 에 없음:${missing/REF/SUPABASE_PROJECT_REF}. docs/AUTOTRADE.md 를 보세요."
+            exit 1
+          fi
+          case "$KIS_ACCOUNT" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9]) ;;
+            *) echo "::error::KIS_ACCOUNT 는 12345678-01 처럼 8자리-2자리 여야 합니다."; exit 1 ;;
+          esac
+          # the function's own password: derived from the Supabase token, so there is nothing more to type
+          echo "::add-mask::$(printf '%s' "$SUPABASE_ACCESS_TOKEN:trader" | sha256sum | cut -c1-40)"
+          echo "TRADER_SECRET=$(printf '%s' "$SUPABASE_ACCESS_TOKEN:trader" | sha256sum | cut -c1-40)" >> "$GITHUB_ENV"
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.122.1
+
+      - name: Tables
+        run: python3 pipeline/supabase_sql.py supabase/migrations/001_trader.sql
+
+      - name: Deploy the function
+        run: supabase functions deploy trader --project-ref "$REF" --no-verify-jwt --use-api
+
+      - name: Function secrets
+        run: |
+          umask 077
+          {
+            echo "KIS_APP_KEY=$KIS_APP_KEY"
+            echo "KIS_APP_SECRET=$KIS_APP_SECRET"
+            echo "KIS_ACCOUNT=$KIS_ACCOUNT"
+            echo "KIS_MODE=$MODE"
+            echo "TRADER_SECRET=$TRADER_SECRET"
+          } > "$RUNNER_TEMP/trader.env"
+          supabase secrets set --project-ref "$REF" --env-file "$RUNNER_TEMP/trader.env"
+          rm "$RUNNER_TEMP/trader.env"
+
+      - name: Every minute during the market (pg_cron)
+        run: |
+          sed -e "s/<PROJECT_REF>/$REF/" -e "s/<TRADER_SECRET>/$TRADER_SECRET/" supabase/cron.sql > "$RUNNER_TEMP/cron.sql"
+          python3 pipeline/supabase_sql.py "$RUNNER_TEMP/cron.sql"
+          rm "$RUNNER_TEMP/cron.sql"
+
+      - name: New buys on / off
+        if: inputs.buying != '그대로'
+        run: |
+          v=$([ "$BUYING" = "켜기" ] && echo true || echo false)
+          echo "update trader_config set enabled = $v, updated_at = now() where id = 1;" > "$RUNNER_TEMP/on.sql"
+          python3 pipeline/supabase_sql.py "$RUNNER_TEMP/on.sql"
+          echo "새 매수: $BUYING"
+
+      - name: Check the keys and the account (no order)
+        run: |
+          sleep 5
+          curl -sS -X POST "https://$REF.supabase.co/functions/v1/trader" \
+            -H "content-type: application/json" -H "x-trader-secret: $TRADER_SECRET" \
+            -d '{"action":"check"}' | tee "$RUNNER_TEMP/check.json"
+          echo
+          python3 - "$RUNNER_TEMP/check.json" <<'EOF'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          ok = r.get("database") == "ok" and r.get("kis_account") == "ok"
+          lines = ["모드: %s" % r.get("mode"), "DB: %s" % r.get("database"),
+                   "한국투자증권: %s" % ("ok" if r.get("kis_account") == "ok" else r.get("kis") or r.get("error")),
+                   "보유: %s" % (", ".join(r.get("holdings") or []) or "없음")]
+          print("\n".join(lines))
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("## 자동매매 설정 %s\n\n" % ("✅ 완료" if ok else "❌ 확인 필요") + "\n".join("- " + x for x in lines) + "\n")
+          sys.exit(0 if ok else 1)
+          EOF

@@ -80,13 +80,23 @@ jobs:
         env:
           TRADER_URL: ${{ vars.TRADER_URL }}
           TRADER_SECRET: ${{ secrets.TRADER_SECRET }}
-        run: python3 pipeline/send_plans.py
+          REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          # trader-setup 으로 설정했으면 주소와 비밀값은 Supabase 시크릿에서 알아서 만들어 씁니다
+          if [ -z "$TRADER_URL" ] && [ -n "$REF" ]; then export TRADER_URL="https://$REF.supabase.co/functions/v1/trader"; fi
+          if [ -z "$TRADER_SECRET" ] && [ -n "$SUPABASE_ACCESS_TOKEN" ]; then
+            export TRADER_SECRET=$(printf '%s' "$SUPABASE_ACCESS_TOKEN:trader" | sha256sum | cut -c1-40)
+          fi
+          python3 pipeline/send_plans.py
 
       # 사이트가 자동매매 현황을 읽어 갈 주소 (읽기 전용 status 만 공개)
       - name: Point the site at the auto trader
         env:
           TRADER_URL: ${{ vars.TRADER_URL }}
+          REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
+          if [ -z "$TRADER_URL" ] && [ -n "$REF" ]; then TRADER_URL="https://$REF.supabase.co/functions/v1/trader"; fi
           if [ -n "$TRADER_URL" ]; then printf '{"status_url": "%s"}\n' "$TRADER_URL" > site/trader.json; fi
 
       - uses: actions/upload-pages-artifact@v3
